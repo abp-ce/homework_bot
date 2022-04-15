@@ -1,4 +1,3 @@
-# import datetime
 import logging
 import os
 import sys
@@ -23,20 +22,13 @@ ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
 
-HOMEWORK_STATUSES = {
+VERDICTS = {
     'approved': 'Работа проверена: ревьюеру всё понравилось. Ура!',
     'reviewing': 'Работа взята на проверку ревьюером.',
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = StreamHandler(stream=sys.stdout)
-formatter = logging.Formatter(
-    '%(asctime)s %(levelname)s %(message)s'
-)
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 
 def send_message(bot: telegram.Bot, message: str) -> None:
@@ -56,29 +48,28 @@ def get_api_answer(current_timestamp: int) -> dict:
     """Запрашивает endpoint, в случае ошибки бросает EndPointException."""
     timestamp = current_timestamp or int(time.time())
     params = {'from_date': timestamp}
-    response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-    if response.status_code == HTTPStatus.NOT_FOUND:
-        raise exceptions.EndPointException(
-            'Сбой в работе программы: Эндпоинт'
-            '  https://practicum.yandex.ru/api/user_api/homework_statuses/'
-            f' недоступен. Код ответа API: {response.status_code}'
-        )
+    logger.debug('Запрос к эндпоинту.')
+    try:
+        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+    except requests.ConnectionError as error:
+        raise exceptions.EndPointException('Сбой в работе программы: ' + error)
     if response.status_code != HTTPStatus.OK:
         raise exceptions.EndPointException(
-            'Сбой в работе программы:'
-            f' Что-то пошло не так. Код ответа API: {response.status_code}'
+            'Эндпоинт'
+            '  https://practicum.yandex.ru/api/user_api/homework_statuses/'
+            f' недоступен. Параметры запроса: {params}. Код ответа API:'
+            f' {response.status_code}. Текст ответа: {response.text}'
         )
     return response.json()
 
 
 def check_response(response: requests.Response) -> list:
     """Проверяет ответ на типы и наличие ключей."""
+    logger.debug('Проверка ответа на запрос к эндпоинту.')
     if not isinstance(response, dict):
         raise TypeError('Ответ не является словарём')
-    if 'current_date' not in response:
-        raise KeyError('Отсутствует ключ "current_date"')
-    if 'homeworks' not in response:
-        raise KeyError('Отсутствует ключ "homeworks"')
+    if 'current_date' not in response or 'homeworks' not in response:
+        raise KeyError('Отсутствует ключ "current_date" или "homeworks"')
     if not isinstance(response['homeworks'], list):
         raise TypeError('Ключ "homeworks" не список')
     return response['homeworks']
@@ -90,16 +81,20 @@ def parse_status(homework: dict) -> str:
     В качестве параметра функция получает только один элемент из списка
     домашних работ. В случае успеха, функция возвращает подготовленную для
     отправки в Telegram строку, содержащую один из вердиктов словаря
-    HOMEWORK_STATUSES.
+    VERDICTS.
     """
-    homework_name = homework['homework_name'] or None
-    homework_status = homework['status'] or None
-    if homework_status not in HOMEWORK_STATUSES:
+    homework_name = homework.get('homework_name')
+    homework_status = homework.get('status')
+    if not homework_name:
+        raise KeyError(
+            'Значение homework_name пустое или отсутствует.'
+        )
+    if homework_status not in VERDICTS:
         raise KeyError(
             'Недопустимый статус: {homework_status}'
         )
 
-    verdict = HOMEWORK_STATUSES[homework_status]
+    verdict = VERDICTS[homework_status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
@@ -110,23 +105,7 @@ def check_tokens() -> bool:
     функция должна вернуть False, иначе — True.
     """
     response = True
-    if PRACTICUM_TOKEN is None:
-        logger.critical(
-            'Отсутствует обязательная переменная окружения:'
-            'PRACTICUM_TOKEN. Программа принудительно остановлена.'
-        )
-        response = False
-    if TELEGRAM_TOKEN is None:
-        logger.critical(
-            'Отсутствует обязательная переменная окружения:'
-            'TELEGRAM_TOKEN. Программа принудительно остановлена.'
-        )
-        response = False
-    if TELEGRAM_CHAT_ID is None:
-        logger.critical(
-            'Отсутствует обязательная переменная окружения:'
-            'TELEGRAM_CHAT_ID. Программа принудительно остановлена.'
-        )
+    if not all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
         response = False
     return response
 
@@ -134,13 +113,16 @@ def check_tokens() -> bool:
 def main() -> None:
     """Основная логика работы бота."""
     if not check_tokens():
-        return
+        error = (
+            'Отсутствует одна или более из обязательных переменных окружения:'
+            ' PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID.'
+            ' Программа принудительно остановлена.'
+        )
+        logger.critical(error)
+        sys.exit(error)
 
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
-    # shift = datetime.timedelta(days=30)
-    # date_time = datetime.datetime.now() - shift
-    # current_timestamp = int(date_time.strftime("%s"))
     message, last_message = '', ''
     while True:
         try:
@@ -155,6 +137,8 @@ def main() -> None:
             message = f'Сбой в работе программы: {error}'
             logger.error(error)
         finally:
+            # Не поправлял. Потому что в telegram должна отправится и ошибка
+            # и удачное изменение статуса, причём до sleep.
             if message != last_message:
                 send_message(bot, message)
             last_message = message
@@ -162,4 +146,12 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    logger.setLevel(logging.DEBUG)
+    handler = StreamHandler(stream=sys.stdout)
+    formatter = logging.Formatter(
+        '%(asctime)s %(levelname)s %(funcName)s %(lineno)d %(message)s'
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
     main()
