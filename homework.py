@@ -137,8 +137,6 @@ def main() -> None:
             message = f'Сбой в работе программы: {error}'
             logger.error(error)
         finally:
-            # Не поправлял. Потому что в telegram должна отправится и ошибка
-            # и удачное изменение статуса, причём до sleep.
             if message != last_message:
                 send_message(bot, message)
             last_message = message
